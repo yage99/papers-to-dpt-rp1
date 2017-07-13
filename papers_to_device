@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-
+# -*- coding: UTF-8 -*-
 import subprocess, os, shutil, re, cPickle, sys, time
 from colortext import colortext
 from PyPDF2 import PdfFileReader, PdfFileWriter
@@ -44,38 +44,55 @@ def search_parents(path, filename):
 def get_papers():
 	script = """
 	set z to ""
-	tell application "Papers"
-		repeat with p in (selected publications of front library window as list)
+tell application "Papers"
+	repeat with c in (collection items as list)
+		repeat with p in (publication item of c as list)
 			if p's primary file item is not missing value then
 				set original_filename to the full path of the primary file item of p
-				set new_filename to my strip(the publication year of p) & "-" & my strip(the name of the first author item of p) & " - " & my strip(the title of p) & " - " & my strip(the bundle name of p) & ".pdf"
+				set new_filename to my strip(the title of p)
+				set pub_year to my strip(the publication year of p)
+				set auth_name to my strip(the name of the first author item of p)
+				set bundle_name to my strip(the bundle name of p)
+				repeat with s in (supplemental file item of p)
+					repeat 1 times
+						set sup_filename to the full path of s
+						if "pdf" is not in sup_filename then
+							exit repeat
+						end if
+						set original_filename to original_filename & " |-| " & sup_filename
+					end repeat
+				end repeat
 				set l to original_filename & "	" & new_filename
-				set z to z & "\n" & l
+				set z to z & "
+" & l & "	" & pub_year & "-" & auth_name & "	" & bundle_name & "	" & (name of c)
 			end if
 		end repeat
-	end tell
-	return z
+		
+	end repeat
+end tell
 
-	on strip(str)
-		local str, whiteSpace
+return z
+
+on strip(str)
+	local str, whiteSpace
+	try
+		set str to str as string
+		set whiteSpace to {character id 10, return, space, tab}
 		try
-			set str to str as string
-			set whiteSpace to {character id 10, return, space, tab}
-			try
-				repeat while str's first character is in whiteSpace
-					set str to str's text 2 thru -1
-				end repeat
-				repeat while str's last character is in whiteSpace
-					set str to str's text 1 thru -2
-				end repeat
-				return str
-			on error number -1728
-				return ""
-			end try
-		on error eMsg number eNum
-			error "Can't strip: " & eMsg number eNum
+			repeat while str's first character is in whiteSpace
+				set str to str's text 2 thru -1
+			end repeat
+			repeat while str's last character is in whiteSpace
+				set str to str's text 1 thru -2
+			end repeat
+			return str
+		on error number -1728
+			return ""
 		end try
-	end strip
+	on error eMsg number eNum
+		error "Can't strip: " & eMsg number eNum
+	end try
+end strip
 """
 
 	osa = subprocess.Popen(['osascript', '-'],
@@ -150,64 +167,83 @@ def papers_to_dir(dest, root=None, corrdict='.papers.pickle', test=False):
 		cd = {}
 	update_pickle = False
 
-	papernames = {os.path.basename(k): k for k in cd.keys()}
+	papernames = {k: k for k in cd.keys()}
 
 	if not os.path.exists(dest):
 		os.makedirs(dest)
 
 	#Fetch selected papers from Papers and operate on each
-	for origfn,d in get_papers():
-		infos = re.sub(':\s', ' - ', d)
-		infos = infos.rsplit('.', 1)[0]
-		[authors, papername, bundle] = infos.split(' - ');
-		papername = papername + '.pdf'
-		destfn   = os.path.join(dest, papername)  #remove colons in names
-		destpath = os.path.relpath(destfn, root)
-		if papername in papernames:
-			debug("%s already in %s, not copying" % (c(papername),
-					os.path.dirname(papernames[papername])))
-			continue
-		cd[destpath] = origfn
+	newFiles = []
+	for origfns ,papername , authors, bundle, folder in get_papers():
+		debug(origfns + papername + folder)
+		collectionDest = os.path.join(dest, folder)
+		if not os.path.exists(collectionDest):
+			os.makedirs(collectionDest)
 
-		#Don't update changed or older files
-		if os.path.exists(destfn):
-			otime = os.stat(origfn).st_mtime 
-			dtime = os.stat(destfn).st_mtime
-			if otime == dtime:
-				debug("Not updating unchanged files\n  %s\nand\n  %s\n" % (
-					c(destfn), y(origfn)))
+
+		papername = re.sub(':\s', '：', papername)
+		papername = folder + '/' + papername.replace('/', '／') + '.pdf'
+		toCopys = origfns.split(" |-| ")
+		for i in range(len(toCopys)):
+			origfn = toCopys[i]
+			if not i == 0:
+				#papername = papername[:-25]
+				papername = papername + ("-supplemental-%d.pdf" % i)
+
+			destfn   = os.path.join(dest, papername)  #remove colons in names
+			destpath = os.path.relpath(destfn, root)
+			newFiles.append(papername)
+			if papername in papernames:
+				debug("%s already in %s, not copying" % (c(papername),
+						os.path.dirname(papernames[papername])))
 				continue
-			elif otime > dtime:
-				debug("WARNING: Not overwriting newer file\n  %s\nwith older\n %s\n" % (
-					c(destfn), y(origfn)))
-				continue
+			cd[destpath] = origfn
 
-		print c(os.path.basename(destfn))
-		update_pickle = True
+			#Don't update changed or older files
+			if os.path.exists(destfn):
+				otime = os.stat(origfn).st_mtime 
+				dtime = os.stat(destfn).st_mtime
+				if otime == dtime:
+					debug("Not updating unchanged files\n  %s\nand\n  %s\n" % (
+						c(destfn), y(origfn)))
+					continue
+				elif otime > dtime:
+					debug("WARNING: Not overwriting newer file\n  %s\nwith older\n %s\n" % (
+						c(destfn), y(origfn)))
+					continue
 
-		#Try to copy the file. Sometimes the USB connection seems to get
-		# overwhelmed, so try up to 3 times with a .5s pause in between.
-		if not test:
-			tries = 0
-			err = (None, None, None)
-			while tries < 3:
-				try:
-					copyPdf(origfn, destfn, papername, authors, bundle)
-					#shutil.copy2(origfn, destfn)
-				except OSError as (errno, strerr):
-					if errno == 22:
-						sys.stderr.write("OSError, will try again")
-						err = sys.exc_info()
-						p = subprocess.Popen("sync", shell=True)
-						sts = os.waitpid(p.pid, 0)[1]
-						time.sleep(.5)
-						tries += 1
+			print c(os.path.basename(destfn))
+			update_pickle = True
+
+			#Try to copy the file. Sometimes the USB connection seems to get
+			# overwhelmed, so try up to 3 times with a .5s pause in between.
+			if not test:
+				tries = 0
+				err = (None, None, None)
+				while tries < 3:
+					try:
+						copyPdf(origfn, destfn, papername, authors, bundle)
+						#shutil.copy2(origfn, destfn)
+					except OSError as (errno, strerr):
+						if errno == 22:
+							sys.stderr.write("OSError, will try again")
+							err = sys.exc_info()
+							p = subprocess.Popen("sync", shell=True)
+							sts = os.waitpid(p.pid, 0)[1]
+							time.sleep(.5)
+							tries += 1
+						else:
+							raise
 					else:
-						raise
-				else:
-					break
-			if tries >= 3:
-				raise err[0], err[1], err[2]
+						break
+				if tries >= 3:
+					raise err[0], err[1], err[2]
+
+	for f in papernames:
+		if f not in newFiles:
+			os.remove(os.path.join(dest, f))
+			del(cd[f])
+			print "del %s" % f
 
 	if update_pickle:
 		if test:
@@ -216,6 +252,9 @@ def papers_to_dir(dest, root=None, corrdict='.papers.pickle', test=False):
 			pprint(cd)
 		else:
 			cPickle.dump(cd, open(pfile, 'w'),  cPickle.HIGHEST_PROTOCOL)
+
+			
+
 
 
 def copyPdf(origfn, destfn, title, authors, bundle):
@@ -243,6 +282,7 @@ def copyPdf(origfn, destfn, title, authors, bundle):
 	writer.write(fout)
 	fin.close()
 	fout.close()
+
 
 
 def papers_from_dir(root, corrdict='.papers.pickle', test=False):
